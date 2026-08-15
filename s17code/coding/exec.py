@@ -124,8 +124,17 @@ def run_command(workspace: Workspace, command: str | list[str], *,
     _check(argv)
     timeout = max(1, min(int(timeout), MAX_TIMEOUT))
 
+    child_env = {"PATH": os.environ.get("PATH", ""), "HOME": str(workspace.root),
+                 "LANG": "C.UTF-8", "PYTHONDONTWRITEBYTECODE": "1"}
     if os.getenv("S17_EXEC_CONTAINER", "").strip() == "1":
         image = os.getenv("S17_EXEC_IMAGE", "python:3.11-slim")
+        docker_host = os.getenv("DOCKER_HOST", "").strip()
+        if docker_host:
+            if not docker_host.startswith("unix://") or any(
+                marker in docker_host for marker in ("\n", "\r", "\0")
+            ):
+                raise CommandError("DOCKER_HOST must identify a local Unix socket")
+            child_env["DOCKER_HOST"] = docker_host
         argv = ["docker", "run", "--rm", "--network=none",
                 "--memory=1g", "--cpus=1", "--pids-limit=256",
                 "-v", f"{workspace.root}:/workspace", "-w", "/workspace",
@@ -137,8 +146,7 @@ def run_command(workspace: Workspace, command: str | list[str], *,
         completed = subprocess.run(
             argv, cwd=workspace.root, capture_output=True, text=True,
             timeout=timeout, shell=False,            # never a shell
-            env={"PATH": os.environ.get("PATH", ""), "HOME": str(workspace.root),
-                 "LANG": "C.UTF-8", "PYTHONDONTWRITEBYTECODE": "1"},
+            env=child_env,
         )
         return CommandResult(
             argv, completed.returncode,

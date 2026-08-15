@@ -151,6 +151,37 @@ def test_a_failing_command_is_evidence_rather_than_an_exception(repo) -> None:
     assert result.ok is False           # reported, not raised
 
 
+def test_container_runner_preserves_only_an_explicit_local_docker_socket(
+    repo, monkeypatch
+) -> None:
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        captured["env"] = kwargs["env"]
+        return subprocess.CompletedProcess(argv, 0, "P5CHECK PASS", "")
+
+    monkeypatch.setenv("S17_EXEC_CONTAINER", "1")
+    monkeypatch.setenv("S17_EXEC_IMAGE", "node:22.20.0-alpine")
+    monkeypatch.setenv("DOCKER_HOST", "unix:///local/docker.sock")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = run_command(repo, ["node", "p5check.js", "sketch.js"])
+
+    assert result.exit_code == 0
+    assert captured["env"]["DOCKER_HOST"] == "unix:///local/docker.sock"
+    assert captured["argv"][:5] == ["docker", "run", "--rm", "--network=none", "--memory=1g"]
+    assert captured["argv"][-3:] == ["node", "p5check.js", "sketch.js"]
+
+
+def test_container_runner_refuses_remote_docker_daemon(repo, monkeypatch) -> None:
+    monkeypatch.setenv("S17_EXEC_CONTAINER", "1")
+    monkeypatch.setenv("DOCKER_HOST", "tcp://docker.example:2375")
+
+    with pytest.raises(CommandError, match="local Unix socket"):
+        run_command(repo, ["node", "p5check.js", "sketch.js"])
+
+
 # ----------------------------------------------------------------------- finding things
 
 def test_glob_and_grep_answer_different_questions(repo) -> None:
