@@ -11,8 +11,14 @@ from pathlib import Path
 import pytest
 
 from s17code.coding import (
-    CommandError, EditError, GuardError, Workspace, WorkspaceError,
-    glob_files, grep_code, run_command,
+    CommandError,
+    EditError,
+    GuardError,
+    Workspace,
+    WorkspaceError,
+    glob_files,
+    grep_code,
+    run_command,
 )
 from s17code.coding.edit import EditLedger, apply_edit, create_file, read_code
 from s17code.coding.guard import is_protected

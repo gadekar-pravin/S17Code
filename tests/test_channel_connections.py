@@ -4,9 +4,9 @@ import json
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
+import conftest
 import httpx
 
-import conftest
 import s17code.routes as agent_route
 from s17code.core.live_graph import Deferred, GraphPatch, TaskSpec
 from s17code.core.memory.embeddings import DeterministicEmbedder

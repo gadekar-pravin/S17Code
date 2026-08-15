@@ -22,14 +22,24 @@ import httpx
 from s17code.core.a2a import A2AClient
 from s17code.core.a2a.trust import AgentCardTrustPolicy
 from s17code.core.live_graph import Deferred, TaskSpec
-from s17code.core.memory import MemoryKind, MemoryRecord
-from s17code.workers.parsing import _as_section, _parse_json_array, _parse_json_object, _slug
 from s17code.tools import (
-    calculate, copy_file, current_datetime, date_shift, fetch_url, file_sha256,
-    file_uri_to_path, query_csv, sandbox_directories, sandbox_files, sandbox_path,
-    web_search, write_text_file,
+    calculate,
+    copy_file,
+    current_datetime,
+    date_shift,
+    fetch_url,
+    file_sha256,
+    file_uri_to_path,
+    query_csv,
+    sandbox_directories,
+    sandbox_files,
+    sandbox_path,
+    web_search,
+    write_text_file,
 )
 from s17code.workers.context import RunContext
+from s17code.workers.parsing import _as_section, _parse_json_array, _parse_json_object, _slug
+from s17code.workers.special import recall
 
 __all__ = ['run_calculate', 'run_current_datetime', 'run_date_shift', 'run_fetch', 'run_file_sha256', 'run_query_csv', 'run_search', 'run_copy_file', 'run_read_file', 'run_write_file', 'run_index', 'list_channels', 'request_approval', 'run_retriever', 'list_directory', 'run_verify_artifact', 'send_channel_message', 'a2a_delegate', 'create_calendar_events', 'load_skill', 'launch_job', 'run_content', 'run_researcher']
 
@@ -97,8 +107,12 @@ async def request_approval(ctx: RunContext, task: TaskSpec) -> Deferred:
                      "choices": task.input.get("choices", [])})
 
 
-async def run_retriever(ctx: RunContext, task: TaskSpec) -> dict[str, Any]:
-    hits = await recall(TaskSpec(task.id, "memory_recall", {"query": task.input.get("query", ctx.goal)}))
+async def run_retriever(ctx: RunContext, task: TaskSpec, *, inbound_id: Any) -> dict[str, Any]:
+    hits = await recall(
+        ctx,
+        TaskSpec(task.id, "memory_recall", {"query": task.input.get("query", ctx.goal)}),
+        inbound_id=inbound_id,
+    )
     result = await ctx.llm(json.dumps(hits), "You are the retriever role. Summarise only supplied scoped memory evidence.")
     return {**hits, "text": result.get("text", ""), "provider": result.get("provider"),
             "model": result.get("model"), "agent": task.skill}

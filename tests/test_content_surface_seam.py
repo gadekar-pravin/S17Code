@@ -14,7 +14,6 @@ import json
 
 from s17code.runtime import _as_section, _parse_json_array
 
-
 QUESTIONS = [
     {"id": "Q1", "stem": "A solid sphere rolls without slipping. Its acceleration is:",
      "options": ["A) (5/7)g", "B) (2/3)g", "C) (3/5)g", "D) (7/5)g"],

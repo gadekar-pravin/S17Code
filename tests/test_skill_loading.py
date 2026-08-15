@@ -15,7 +15,7 @@ import pytest
 
 from s17code.capabilities import default_registry
 from s17code.planner import GeneralAgentPlanner
-from s17code.skills import GenericSkill, SkillError, SkillManager
+from s17code.skills import SkillError, SkillManager
 
 
 def write(tmp_path, folder: str, text: str, refs: dict[str, str] | None = None):
