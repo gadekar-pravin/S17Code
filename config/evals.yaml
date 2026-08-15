@@ -102,7 +102,9 @@ judge:
   # is disclosure, not enforcement: sometimes there is no independent judge to be
   # had, and then the reader deserves to know.
   # These two are chosen to be disjoint from every rung of tiers.yaml, which today
-  # answers on groq / gemini / github. Repoint a rung onto one of these and the
+  # answers on openrouter / gemini. judge_b shares the openrouter PROVIDER with
+  # the economy rung but not its model, which is what independence turns on.
+  # Repoint a rung onto one of these and the
   # self_judged flag will start firing and p1's independence check will fail —
   # which is the intended behaviour, not a bug: it means the panel needs moving.
   panel:

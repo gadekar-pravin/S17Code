@@ -18,28 +18,68 @@ default_tier: standard
 # rung of the ladder was the same model, so a downgrade could never be a change
 # of model, only a change of how hard that one model was allowed to think.
 #
-# Each rung below is a DIFFERENT model on a DIFFERENT provider, and the three
-# were measured against glc_v4 on 2026-07-30 before being written down. One
-# identical 3-sentence prompt, max_tokens 512, temperature 0, reasoning off:
+# Each rung below is therefore a DIFFERENT model, and the rungs are not all on
+# one provider's menu. `tests/test_cross_model_ladder.py` enforces both, along
+# with strictly rising per-token rates and a priced, non-free bottom rung.
 #
-#   rung      provider    model                    $/Mtok in/out  latency  answered
-#   economy   groq        openai/gpt-oss-120b      0.15 / 0.75    0.74 s   yes
-#   standard  gemini      gemini-3.1-flash-lite    0.25 / 1.50    1.24 s   yes
-#   frontier  github      openai/gpt-4.1           2.00 / 8.00    2.88 s   yes
+#   rung      provider    model                         $/Mtok in/out  projected
+#   economy   openrouter  deepseek/deepseek-v4-flash    0.064 / 0.129  $0.000143
+#   standard  gemini      gemini-3.5-flash-lite         0.200 / 1.200  $0.001729
+#   frontier  openrouter  google/gemini-3.7-flash       0.375 / 1.875  $0.009930
 #
-# Input rate, output rate and latency all rise monotonically along the ladder,
-# which is what makes "one rung down" unambiguous. Projected worst-case cost per
-# call (the number admission actually uses) is $0.000564 / $0.002161 / $0.044768
-# — a 79x spread across the ladder, where the same-model ladder managed 5x.
+# Input rate and output rate both rise monotonically along the ladder, which is
+# what makes "one rung down" unambiguous. `projected` is the worst-case cost per
+# call that admission actually prices — a 69x spread across the ladder, where
+# the same-model ladder managed 5x.
+#
+# ── Why the frontier rung is on OpenRouter and not the AI Studio key ─────────
+# The same model is reachable both ways. It is only usable one way. MEASURED
+# 2026-08-15, eight back-to-back calls each: via openrouter, 8/8 answered in
+# 3.5-5.1 s. Via the AI Studio key, 2 of 6 returned HTTP 503 "this model is
+# currently experiencing high demand", and the calls that did land took 34 s and
+# 43 s — long enough that glc benched the whole key on a timeout backoff for five
+# minutes. A backoff is per KEY, not per model, so the frontier rung's failures
+# took the standard rung offline with it. Moving the heaviest, most latency-prone
+# rung off the shared free-tier key is what stops one rung's bad day from being
+# every rung's bad day.
+#
+# The standard rung stays on the AI Studio key deliberately: the ladder has to
+# span more than one provider (tests/test_cross_model_ladder.py and p7 both
+# enforce it), and a ladder that cannot demonstrate cross-provider routing is
+# not a router. flash-lite is the right rung to leave there — it measured
+# 0.95-1.14 s and never 503'd on its own. glc still paces each Gemini key with a
+# ~3 s cooldown, so back-to-back standard calls can 503; S17's own gateway client
+# retries 429/502/503 five times with exponential backoff (7.5 s total), which
+# covers it.
+#
+# ── Why this ladder and not the previous one ─────────────────────────────────
+# Until 2026-08-15 the rungs were groq/openai/gpt-oss-120b, gemini/
+# gemini-3.1-flash-lite and github/openai/gpt-4.1, measured against glc_v4 on
+# 2026-07-30 (0.15/0.75, 0.25/1.50, 2.00/8.00; a 79x spread). That ladder needs
+# Groq and GitHub Models credentials. The gateway this deployment talks to holds
+# Gemini and OpenRouter keys only, and because `role_tiers` sends the PLANNER to
+# the frontier rung, an unreachable top rung is not a degraded ladder — it is
+# every run failing on its first call, with an empty graph and $0 spent.
+#
+# Gemini rates are the ai.google.dev list prices recorded in glc_v5's own
+# pricing table (checked 2026-08-15); both rungs are free-tier eligible under the
+# course quota, so list rates are what a paid deployment would report rather than
+# what this one is billed. The deepseek rate is OpenRouter's published rate for
+# the same date. None of the three has been measured on this gateway yet — the
+# `measured_*` keys in pricing.yaml are absent for them on purpose, because that
+# annotation means "someone called it and wrote down what came back".
 #
 # Two facts worth keeping, both learned the hard way:
 #
-#   `reasoning: "off"` is not decoration on the cheap rung. gpt-oss-120b thinks
-#   by default: at max_tokens 128 with the dial left alone it spent all 128
-#   output tokens in its reasoning channel and returned content "" — a fully
-#   billed non-answer. The same call with the dial off returned a 570-character
-#   answer in 117 tokens. glc_v4's providers.py now translates "off" into the
-#   dialect each server understands; the tier only has to ask.
+#   `reasoning: "off"` is not decoration on the cheap rung. gpt-oss-120b — the
+#   previous economy rung, whose row is still in pricing.yaml — thinks by
+#   default: at max_tokens 128 with the dial left alone it spent all 128 output
+#   tokens in its reasoning channel and returned content "" — a fully billed
+#   non-answer. The same call with the dial off returned a 570-character answer
+#   in 117 tokens. glc's providers.py translates "off" into the dialect each
+#   server understands; the tier only has to ask. The dial is set on the economy
+#   rung below for that reason and not because deepseek-v4-flash is known to
+#   need it: p7's "no rung returns empty text" check is what would tell us.
 #
 #   The cheapest rung is deliberately NOT free. This gateway can also reach
 #   ollama/gemma4:31b and openrouter's nvidia/nemotron-3-super-120b-a12b:free at
@@ -48,8 +88,8 @@ default_tier: standard
 #   stops being expressible in dollars and falls entirely to max_calls_per_run.
 #   A free rung wants a call-count budget, not a money budget. Local weights are
 #   also slow: gemma4:31b took 39.6 s (and 86.4 s under load) for the same
-#   prompt the frontier rung answered in 2.9 s, so the cheapest rung on a price
-#   ladder is not the cheapest rung on a latency ladder.
+#   prompt the old frontier rung answered in 2.9 s, so the cheapest rung on a
+#   price ladder is not the cheapest rung on a latency ladder.
 
 tiers:
   economy:
@@ -57,14 +97,14 @@ tiers:
     # body. That is the whole tier -> provider mapping: no Python edit needed to
     # change a provider, a model, a reasoning effort or a token ceiling.
     request:
-      provider: groq
-      model: openai/gpt-oss-120b
+      provider: openrouter
+      model: deepseek/deepseek-v4-flash
       reasoning: "off"
       max_tokens: 512
       temperature: 0
     # Which row of pricing.yaml this tier is billed against. Defaults to the
     # request model when omitted.
-    price_model: openai/gpt-oss-120b
+    price_model: deepseek/deepseek-v4-flash
     # What the estimator assumes before the call returns, in tokens. Real usage
     # replaces this the moment the response lands.
     projected_input_tokens: 1200
@@ -73,23 +113,22 @@ tiers:
   standard:
     request:
       provider: gemini
-      model: gemini-3.1-flash-lite
+      model: gemini-3.5-flash-lite
       reasoning: "off"
       max_tokens: 1024
       temperature: 0
-    price_model: gemini-3.1-flash-lite
+    price_model: gemini-3.5-flash-lite
     projected_input_tokens: 2500
     projected_output_tokens: 800
 
   frontier:
     request:
-      provider: github
-      model: openai/gpt-4.1
-      # gpt-4.1 has no thinking channel to switch off, so the dial is left
-      # alone here rather than sent and ignored.
+      provider: openrouter
+      model: google/gemini-3.7-flash
+      reasoning: "off"
       max_tokens: 4096
       temperature: 0
-    price_model: openai/gpt-4.1
+    price_model: google/gemini-3.7-flash
     projected_input_tokens: 6000
     projected_output_tokens: 2000
 

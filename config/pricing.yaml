@@ -3,11 +3,16 @@
 # Prices are per `unit_tokens` tokens in `currency`. Published July 2026 list
 # prices; verify before teaching, the landscape churns monthly.
 #
-# The three rows marked LADDER are the rungs of config/tiers.yaml, and every one
-# of them was called against glc_v4 on 2026-07-30 before its rate was written
-# down here — same 3-sentence prompt, max_tokens 512, temperature 0, reasoning
-# off. `measured_*` keys are documentation: the loader reads `input` and `output`
-# and ignores the rest, so re-measuring is a config edit.
+# The three rows marked LADDER are the rungs of config/tiers.yaml. `measured_*`
+# keys are documentation: the loader reads `input` and `output` and ignores the
+# rest, so re-measuring is a config edit. An annotation is only written for a
+# model somebody actually called and wrote down the result of — a row with no
+# `measured_*` keys is a published rate nobody has exercised here yet.
+#
+# The rungs were repointed on 2026-08-15 (see tiers.yaml for why). Rows for the
+# retired rungs are KEPT: openai/gpt-oss-120b carries the only
+# `measured_needs_reasoning_off` annotation in this file, and
+# tests/test_cross_model_ladder.py asserts that annotation still exists.
 
 currency: USD
 unit_tokens: 1000000
@@ -19,15 +24,42 @@ default:
 
 models:
   # Google
-  # LADDER rung 2 (standard). MEASURED: 31 in / 89 out, $0.00014125, 1236 ms.
+  # Retired standard rung, kept because it is still served and still free-tier.
+  # MEASURED (as a rung, 2026-07-30): 31 in / 89 out, $0.00014125, 1236 ms.
   gemini-3.1-flash-lite:
     input: 0.25
     output: 1.50
     measured_latency_ms: 1236
     measured_reference_usd: 0.00014125
     measured_non_empty: true
-  gemini-3.1-flash: {input: 0.50, output: 3.00}
-  gemini-3.1-pro: {input: 2.00, output: 12.00}
+  # LADDER rung 3 (frontier), reached via OPENROUTER, not AI Studio — note the
+  # `google/` prefix. OpenRouter's published rate, 2026-08-15. MEASURED
+  # 2026-08-15: 15 in / 394-607 out, 3.5-5.1 s, 8/8 non-empty over eight
+  # back-to-back calls.
+  #
+  # The same model on the AI Studio key is the row below, and it is NOT usable
+  # as a rung: 2 of 6 calls returned HTTP 503 "this model is currently
+  # experiencing high demand", and the 34 s and 43 s calls that did land benched
+  # the whole gemini key for five minutes on a timeout backoff — which then took
+  # the standard rung down with it, because a backoff is per KEY, not per model.
+  google/gemini-3.7-flash: {input: 0.375, output: 1.875}
+  # The AI Studio route for the same model. Kept as documentation of the above,
+  # deliberately not a rung. Free-tier list rate.
+  gemini-3.7-flash: {input: 0.50, output: 3.00}
+  # LADDER rung 2 (standard), on the AI Studio key. ai.google.dev list rate,
+  # 2026-08-15. MEASURED: 16 in / 55-56 out, 0.95-1.14 s, non-empty.
+  gemini-3.5-flash-lite:
+    input: 0.20
+    output: 1.20
+    measured_latency_ms: 1018
+    measured_reference_usd: 0.0000692
+    measured_non_empty: true
+  # Not a rung today; the natural next step up from flash-lite if one is needed.
+  gemini-3.5-flash: {input: 0.45, output: 2.75}
+  # gemini-3.1-flash and gemini-3.1-pro were removed on 2026-08-15: the first is
+  # no longer published, and the second exists only as gemini-3.1-pro-preview,
+  # which is not on the free tier. A row for a model the API will 404 is worse
+  # than no row, because pricing a call is not the same as being able to make it.
   # Open weight / hosted (the other models this gateway serves today)
   #
   # NOT REACHABLE as of 2026-07-30: this is the model NVIDIA_MODEL selects, and
@@ -36,9 +68,30 @@ models:
   # meta/llama-3.1-8b-instruct on the same key answers in 1.37 s.
   deepseek-ai/deepseek-v4-pro: {input: 0.14, output: 0.28}
   meta/llama-3.1-8b-instruct: {input: 0.0, output: 0.0}
-  # LADDER rung 1 (economy). MEASURED: 101 in / 117 out, $0.0001029, 744 ms —
-  # and only with reasoning off. Left to itself it spends the whole output
-  # budget thinking and returns an empty string at full price.
+  # LADDER rung 1 (economy), via openrouter. OpenRouter's published rate on
+  # 2026-08-15; 1,048,576-token context. Note the vendor prefix: this is NOT
+  # deepseek-ai/deepseek-v4-pro above, which is the NVIDIA-hosted naming for a
+  # different model.
+  #
+  # MEASURED 2026-08-15: 19 in / 43 out, $0.00000676, 1460 ms, non-empty.
+  # It thinks by default. The same prompt with the dial left alone returned a
+  # comparable answer for 163 output tokens instead of 43 — 3.8x the billed
+  # output, all of it in the reasoning channel. Unlike gpt-oss-120b it does not
+  # return "", so this is a cost bug rather than an empty-answer bug, but the
+  # dial is set on its rung for the same reason.
+  deepseek/deepseek-v4-flash:
+    input: 0.064
+    output: 0.129
+    measured_latency_ms: 1460
+    measured_reference_usd: 0.00000676
+    measured_non_empty: true
+    measured_needs_reasoning_off: true
+  # Retired economy rung (it was on groq, at this groq rate). KEPT: this is the
+  # only row carrying measured_needs_reasoning_off, which
+  # tests/test_cross_model_ladder.py requires to be non-empty.
+  # MEASURED: 101 in / 117 out, $0.0001029, 744 ms — and only with reasoning
+  # off. Left to itself it spends the whole output budget thinking and returns
+  # an empty string at full price.
   openai/gpt-oss-120b:
     input: 0.15
     output: 0.75
@@ -53,8 +106,8 @@ models:
   zai-glm-4.7: {input: 0.50, output: 0.50}
   # Free tier. MEASURED 47 in / 108 out at 1849 ms with reasoning off.
   nvidia/nemotron-3-super-120b-a12b:free: {input: 0.0, output: 0.0}
-  # LADDER rung 3 (frontier), and the most expensive model this gateway reaches.
-  # MEASURED: 37 in / 76 out, $0.000682, 2883 ms. Context caps at 8k here.
+  # Retired frontier rung (it was on github). MEASURED: 37 in / 76 out,
+  # $0.000682, 2883 ms. Context caps at 8k here.
   openai/gpt-4.1:
     input: 2.00
     output: 8.00
