@@ -131,6 +131,22 @@ checkout, so these gates refuse to serve instead.
 Do not put provider keys in S17Code. `glc_v5` can rotate among its configured
 Gemini keys behind the one logical `gemini` provider.
 
+`glc_v5` needs keys for **both** providers the ladder in `config/tiers.yaml`
+names, or runs fail rather than degrade. The economy and frontier rungs go
+through OpenRouter and the standard rung through Gemini, so `glc_v5/.env` needs:
+
+```text
+GEMINI_API_KEY_1=...
+OPEN_ROUTER_API_KEY=...   # note the underscore: OPEN_ROUTER, not OPENROUTER
+```
+
+A missing key is not a slow ladder, it is a dead one: `role_tiers` sends the
+planner to the frontier rung, so every run fails on its first call with
+`gateway /v1/chat returned 400: unknown provider '<name>'` — a `failed` run with
+an empty graph and `$0` spent. The tell is `calls: 0` in the run's budget report.
+Repointing a rung at a provider you do hold a key for is a `tiers.yaml` edit; see
+that file's header for what the ladder has to keep true.
+
 ## Channel operation and proof
 
 GLC converts provider-specific payloads; S17 sees only the canonical envelope.
