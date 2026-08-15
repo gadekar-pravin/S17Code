@@ -8,8 +8,9 @@ tape alone.
 
 What is checked:
 
-1. The hierarchy is ``run -> agent loop -> plan -> node -> provider call``, read
-   back from the parent pointers the SDK actually produced.
+1. The hierarchy is ``run -> agent loop -> plan/node -> provider call``: planner
+   calls hang from the plan, while capability calls hang from their node. It is
+   read back from the parent pointers the SDK actually produced.
 2. Every provider-call span carries the GenAI semantic-convention attributes
    ``gen_ai.provider.name``, ``gen_ai.request.model``, ``gen_ai.usage.input_tokens``
    and ``gen_ai.usage.output_tokens``, plus a cost.
@@ -64,7 +65,12 @@ from s17code.telemetry.spans import (
 )
 
 REQUIRED_GENAI = (GEN_AI_PROVIDER, GEN_AI_REQUEST_MODEL, GEN_AI_INPUT_TOKENS, GEN_AI_OUTPUT_TOKENS)
-EXPECTED_PARENT = {"agent_loop": "run", "plan": "agent_loop", "node": "agent_loop", "provider_call": "node"}
+EXPECTED_PARENTS = {
+    "agent_loop": {"run"},
+    "plan": {"agent_loop"},
+    "node": {"agent_loop"},
+    "provider_call": {"plan", "node"},
+}
 
 #: Attribute-name fragments that would mean prompt or completion text escaped into
 #: the backend. Checked as substrings so a renamed convention cannot slip past.
@@ -130,12 +136,12 @@ def backend_hierarchy(trace: dict) -> tuple[dict[str, int], list, list]:
     wrong = []
     for span in spans:
         kind = str(tags[span["spanID"]].get("s15.span.kind", ""))
-        expected = EXPECTED_PARENT.get(kind)
+        expected = EXPECTED_PARENTS.get(kind)
         if expected is None:
             continue
         parent = parent_of(span)
         got = str(tags.get(parent, {}).get("s15.span.kind")) if parent else None
-        if got != expected:
+        if got not in expected:
             wrong.append((span["operationName"], kind, got))
     leaks = sorted(
         {key for attrs in tags.values() for key in attrs if any(m in key for m in CONTENT_MARKERS)}
@@ -177,13 +183,13 @@ def run(args: Args) -> Proof:
                 sorted(kinds))
     wrong_parents = []
     for span in spans:
-        expected = EXPECTED_PARENT.get(span["kind"])
+        expected = EXPECTED_PARENTS.get(span["kind"])
         if expected is None:
             continue
         parent = by_id.get(span["parent_span_id"] or "")
-        if not parent or parent["kind"] != expected:
+        if not parent or parent["kind"] not in expected:
             wrong_parents.append((span["name"], span["kind"], parent["kind"] if parent else None))
-    proof.check("run -> agent loop -> plan -> node -> provider call",
+    proof.check("run -> agent loop -> plan/node -> provider call",
                 not wrong_parents, wrong_parents or "every parent is the expected kind")
     proof.check("one run is one trace", len(totals["trace_ids"]) == 1, totals["trace_ids"])
 

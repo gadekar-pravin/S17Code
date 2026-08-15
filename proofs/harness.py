@@ -127,17 +127,43 @@ class OfflineTransport:
     def __init__(self, *, wanted_output: int = 4000, latency_ms: float = 8.0) -> None:
         self.wanted_output, self.latency_ms = wanted_output, latency_ms
 
+    @staticmethod
+    def _text(prompt: str, system: str) -> str:
+        """Return a deterministic reply that satisfies the real caller's contract."""
+        if "evidence-readiness critic" in system:
+            return json.dumps({"ready": True, "missing": [], "reason": "offline evidence is ready"})
+        if "decision core of a live-graph agent" in system:
+            context = json.loads(prompt)
+            context = context.get("original_planning_context", context)
+            graph = context.get("graph") or {}
+            nodes = graph.get("nodes") or []
+            goal = str(context.get("goal") or "Complete the requested task.")
+            terminal = "compose_surface" if context.get("respond_as") == "ui" else "answer_with_evidence"
+            if not nodes:
+                capability = "content"
+                reason = "produce one deterministic offline outcome"
+            else:
+                capability = terminal
+                reason = "return the deterministic offline outcome"
+            return json.dumps({
+                "add": [{"id": capability, "capability": capability,
+                         "arguments": {"query": goal}, "depends_on": []}],
+                "cancel": [], "finish": False, "reason": reason,
+            })
+        digest = hashlib.sha256((prompt + system).encode()).hexdigest()[:12]
+        return json.dumps({"offline": True, "digest": digest,
+                           "note": "deterministic offline transport; no provider was called"})
+
     async def chat(self, *, prompt: str, system: str, request: dict[str, Any] | None = None) -> dict[str, Any]:
         request = dict(request or {})
         ceiling = int(request.get("max_tokens") or self.wanted_output)
-        digest = hashlib.sha256((prompt + system).encode()).hexdigest()[:12]
+        reply = self._text(prompt, system)
         return {
-            "text": json.dumps({"offline": True, "digest": digest,
-                                "note": "deterministic offline transport; no provider was called"}),
+            "text": reply,
             "provider": "offline_1",
             "model": request.get("model", "offline-model"),
             "input_tokens": len(prompt) // 4 + len(system) // 4,
-            "output_tokens": min(self.wanted_output, ceiling),
+            "output_tokens": min(self.wanted_output, ceiling, max(1, (len(reply) + 3) // 4)),
             "cache_read_input_tokens": 0,
             "cache_creation_input_tokens": 0,
             "latency_ms": self.latency_ms,

@@ -10,6 +10,7 @@ The hierarchy the spec asks for falls straight out of the journal:
     run                     the whole tape for one run_id
     └── agent loop          one planning round (a graph_patched event)
         ├── plan            what the planner decided, and why
+        │   └── provider call   one metered planner model call
         └── node            a task, from task_started to its terminal event
             └── provider call   one metered model call inside that task
 
@@ -151,7 +152,7 @@ def build_span_tree(
     principal: str | None = None,
     tick_seconds: float = SEQUENCE_TICK_SECONDS,
 ) -> SpanNode:
-    """Build ``run -> agent loop -> plan -> node -> provider call`` from a journal.
+    """Build ``run -> agent loop -> plan/node -> provider call`` from a journal.
 
     ``run`` is the journal shape the runtime and the UI already pass around:
     ``{run_id, finished, nodes, edges, events}`` with events as

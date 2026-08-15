@@ -51,6 +51,7 @@ def _trace():
             _span("a", "run", name="run r-1"),
             _span("b", "agent_loop", parent="a"),
             _span("c", "plan", parent="b"),
+            _span("f", "provider_call", parent="c", name="planner chat some-model"),
             _span("d", "node", parent="b"),
             _span(
                 "e",
@@ -74,7 +75,7 @@ def _trace():
 
 def test_every_level_is_counted_and_every_parent_is_right():
     counts, wrong, leaks = backend_hierarchy(_trace())
-    assert counts == {"run": 1, "agent_loop": 1, "plan": 1, "node": 1, "provider_call": 1}
+    assert counts == {"run": 1, "agent_loop": 1, "plan": 1, "node": 1, "provider_call": 2}
     assert wrong == []
     assert leaks == []
 
