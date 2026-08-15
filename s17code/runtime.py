@@ -5,27 +5,22 @@ carried-forward core components into the code path used by HTTP and channel mess
 """
 from __future__ import annotations
 
-import asyncio
-import hashlib
 import json
 import logging
 import os
-import re
 import uuid
 from collections.abc import Awaitable, Callable
-from datetime import date
+from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
-
-import httpx
 
 from s17code.capabilities import (
     default_registry,
     generic_evidence,
     project_evidence,
 )
-from s17code.core.a2a import A2AClient
-from s17code.core.a2a.trust import AgentCardTrustPolicy
+from s17code.coding import EditLedger, Workspace
 from s17code.core.live_graph import Deferred, GraphStore, LiveGraphExecutor, TaskSpec
 from s17code.core.memory import MemoryKind, MemoryRecord, MemoryScope, MemoryStore, Principal, SourceRef
 from s17code.core.memory.embeddings import OllamaNomicEmbedder
@@ -38,41 +33,41 @@ from s17code.economics import (
     RunBudget,
     call_site,
 )
-from s17code.coding import EditLedger, Workspace, glob_files, grep_code, run_command
-from s17code.coding.edit import apply_edit, create_file as coding_create_file, read_code
 from s17code.events.outbox import ActionOutbox
-from functools import partial
-
 from s17code.planner import GeneralAgentPlanner
-from s17code.workers import RunContext
-from s17code.workers import coding as coding_workers
-from s17code.ui import compose as ui_compose
-from s17code.workers import general
-from s17code.workers import special
-from s17code.workers.parsing import (
-    _as_section, _parse_json_array, _parse_json_object, _slug,
-)
 from s17code.skills import SkillManager
+from s17code.tools import fetch_url, web_search
+from s17code.ui import compose as ui_compose
+from s17code.workers import RunContext, general, special
+from s17code.workers import coding as coding_workers
+from s17code.workers.parsing import _as_section, _parse_json_array
 
 log = logging.getLogger(__name__)
-from s17code.tools import (
-    calculate,
-    copy_file,
-    current_datetime,
-    date_shift,
-    fetch_url,
-    file_sha256,
-    file_uri_to_path,
-    query_csv,
-    sandbox_directories,
-    sandbox_files,
-    sandbox_path,
-    web_search,
-    write_text_file,
-)
+
+__all__ = [
+    "AgentRuntime", "PreparedRun", "_as_section", "_parse_json_array", "fetch_url", "metered", "web_search",
+]
 
 TextLLM = Callable[[str, str], Awaitable[dict[str, Any]]]
 Skill = Callable[[TaskSpec], Awaitable[dict[str, Any] | Deferred]]
+
+
+@dataclass(frozen=True)
+class PreparedRun:
+    """One durable run initialization, ready for synchronous or background execution."""
+
+    run_id: str
+    prompt: str
+    scope: MemoryScope
+    source_uri: str
+    source_author: str
+    inbound_id: str | None
+    resume: bool
+    respond_as: str
+    allowed_side_effects: frozenset[str]
+    budget: float | None
+    principal: str | None
+    initial_evidence: dict[str, Any]
 
 
 def principal_for(scope: MemoryScope) -> str:
@@ -162,6 +157,58 @@ class AgentRuntime:
         type(self)._skill_manager = manager
         return manager
 
+    def prepare_run(self, *, prompt: str, scope: MemoryScope, source_uri: str,
+                    source_author: str, run_id: str | None = None, respond_as: str = "text",
+                    allowed_side_effects: set[str] | None = None, budget: float | None = None,
+                    principal: str | None = None,
+                    initial_evidence: dict[str, Any] | None = None) -> PreparedRun:
+        """Persist a fresh run's inbound memory and resumable graph before it executes."""
+        run_id = run_id or f"run-{uuid.uuid4().hex[:12]}"
+        try:
+            self.graph.snapshot(run_id)
+        except KeyError:
+            pass
+        else:
+            raise ValueError(f"run already exists: {run_id}")
+        user_source = SourceRef(source_uri, source_author, excerpt=prompt)
+        inbound = self.memory.write(MemoryRecord(
+            MemoryKind.EPISODE, scope, prompt, [user_source], Principal("gateway", "gateway"),
+            metadata={"run_id": run_id},
+        ))
+        context = {
+            "prompt": prompt,
+            "scope": {"tenant_id": scope.tenant_id, "project_id": scope.project_id,
+                      "user_id": scope.user_id, "agent_id": scope.agent_id, "run_id": scope.run_id},
+            "source_uri": source_uri,
+            "source_author": source_author,
+            "inbound_id": inbound.id,
+            "respond_as": respond_as,
+            "allowed_side_effects": sorted(allowed_side_effects or ()),
+            "initial_evidence": initial_evidence or {},
+        }
+        if not self.graph.start(run_id, context=context):
+            raise ValueError(f"run already exists: {run_id}")
+        return PreparedRun(
+            run_id=run_id, prompt=prompt, scope=scope, source_uri=source_uri,
+            source_author=source_author, inbound_id=inbound.id, resume=False,
+            respond_as=respond_as, allowed_side_effects=frozenset(allowed_side_effects or ()),
+            budget=budget, principal=principal, initial_evidence=initial_evidence or {},
+        )
+
+    def _prepare_resume(self, run_id: str, *, respond_as: str, budget: float | None,
+                        principal: str | None) -> PreparedRun:
+        """Recover exactly the persisted context; a resume never accepts a new prompt."""
+        context = self.graph.context(run_id)
+        return PreparedRun(
+            run_id=run_id, prompt=str(context["prompt"]), scope=MemoryScope(**context["scope"]),
+            source_uri=str(context["source_uri"]), source_author=str(context["source_author"]),
+            inbound_id=context.get("inbound_id"), resume=True,
+            respond_as=str(context.get("respond_as", respond_as)),
+            allowed_side_effects=frozenset(context.get("allowed_side_effects", [])),
+            budget=budget, principal=principal,
+            initial_evidence=context.get("initial_evidence") or {},
+        )
+
     async def run(self, *, prompt: str | None, scope: MemoryScope | None, llm: TextLLM | None = None,
                   source_uri: str | None, source_author: str | None, run_id: str | None = None,
                   resume: bool = False, respond_as: str = "text",
@@ -169,7 +216,8 @@ class AgentRuntime:
                   budget: float | None = None, principal: str | None = None,
                   transport: ChatTransport | None = None,
                   economics: EconomicsConfig | None = None,
-                  initial_evidence: dict[str, Any] | None = None) -> dict[str, Any]:
+                  initial_evidence: dict[str, Any] | None = None,
+                  _prepared: PreparedRun | None = None) -> dict[str, Any]:
         """Run one request through the live graph.
 
         Pass ``budget`` (with a ``transport``) to create the run *with a ceiling*:
@@ -178,30 +226,28 @@ class AgentRuntime:
         downgrades, branches or refuses each call. Leave ``budget`` unset and the
         run behaves exactly as it did before economics existed.
         """
-        run_id = run_id or f"run-{uuid.uuid4().hex[:12]}"
-        if resume:
-            context = self.graph.context(run_id)
-            prompt = str(context["prompt"])
-            scope = MemoryScope(**context["scope"])
-            respond_as = str(context.get("respond_as", respond_as))
-            allowed_side_effects = set(context.get("allowed_side_effects", []))
-            source_uri, source_author, inbound_id = context["source_uri"], context["source_author"], context.get("inbound_id")
-            initial_evidence = context.get("initial_evidence") or {}
+        if _prepared is not None:
+            prepared = _prepared
+        elif resume:
+            if run_id is None:
+                raise ValueError("resumed runs require a run id")
+            prepared = self._prepare_resume(run_id, respond_as=respond_as, budget=budget,
+                                            principal=principal)
         else:
             if prompt is None or scope is None or source_uri is None or source_author is None:
                 raise ValueError("new runs require prompt, scope, and source identity")
-            user_source = SourceRef(source_uri, source_author, excerpt=prompt)
-            inbound = self.memory.write(MemoryRecord(MemoryKind.EPISODE, scope, prompt, [user_source],
-                                                      Principal("gateway", "gateway"), metadata={"run_id": run_id}))
-            inbound_id = inbound.id
-            self.graph.start(run_id, context={"prompt": prompt, "scope": {"tenant_id": scope.tenant_id,
-                                              "project_id": scope.project_id, "user_id": scope.user_id,
-                                              "agent_id": scope.agent_id, "run_id": scope.run_id},
-                                              "source_uri": source_uri, "source_author": source_author,
-                                              "inbound_id": inbound_id, "respond_as": respond_as,
-                                              "allowed_side_effects": sorted(allowed_side_effects or ()),
-                                              "initial_evidence": initial_evidence or {}})
-        assert prompt is not None and scope is not None and source_uri is not None and source_author is not None
+            prepared = self.prepare_run(
+                prompt=prompt, scope=scope, source_uri=source_uri, source_author=source_author,
+                run_id=run_id, respond_as=respond_as, allowed_side_effects=allowed_side_effects,
+                budget=budget, principal=principal, initial_evidence=initial_evidence,
+            )
+        run_id, prompt, scope = prepared.run_id, prepared.prompt, prepared.scope
+        source_uri, source_author = prepared.source_uri, prepared.source_author
+        inbound_id, resume = prepared.inbound_id, prepared.resume
+        respond_as = prepared.respond_as
+        allowed_side_effects = set(prepared.allowed_side_effects)
+        budget, principal = prepared.budget, prepared.principal
+        initial_evidence = prepared.initial_evidence
         user_source = SourceRef(source_uri, source_author, excerpt=prompt)
 
         # --- JitRL: restate the request before anything plans against it -----
@@ -212,7 +258,6 @@ class AgentRuntime:
         # the run proceeds on the untouched prompt. Off by default, because it
         # costs one model call before any work starts.
         restated_goal = prompt
-        query_rewrite: dict[str, Any] = {"rewritten": False, "reason": "disabled"}
         if os.getenv("S17_QUERY_OPTIMIZER", "0").lower() in {"1", "true", "yes"} and not resume:
             from s17code.reasoning import QueryOptimizer
 
@@ -222,7 +267,6 @@ class AgentRuntime:
 
             optimized = await QueryOptimizer(_optimizer_llm).optimize(prompt)
             restated_goal = optimized.planning_goal()
-            query_rewrite = optimized.as_dict()
             log.info("query optimizer: rewritten=%s %s",
                      optimized.rewritten, optimized.rejected_because or "")
 
@@ -504,6 +548,15 @@ class AgentRuntime:
                 "budget": run_budget.snapshot() if run_budget is not None else None,
                 "economics": economics_config.describe() if economics_config is not None else None,
                 "allocations": list(getattr(planner, "allocations", []))}
+
+    async def execute_prepared(self, prepared: PreparedRun, *, llm: TextLLM | None = None,
+                               transport: ChatTransport | None = None,
+                               economics: EconomicsConfig | None = None) -> dict[str, Any]:
+        """Execute a run that has already crossed its durable initialization boundary."""
+        return await self.run(
+            prompt=None, scope=None, llm=llm, source_uri=None, source_author=None,
+            transport=transport, economics=economics, _prepared=prepared,
+        )
 
     def remember_fact(self, *, text: str, scope: MemoryScope, source_uri: str, source_author: str,
                       principal: Principal, supersedes_id: str | None = None) -> dict[str, Any]:

@@ -19,6 +19,7 @@ WRITE_PATHS = [
     ("post", "/v1/agent/events", {"id": "e1", "source": "s", "type": "t",
                                   "occurred_at": "2026-08-05T09:00:00Z"}),
     ("post", "/v1/agent/runs", {"prompt": "hello", "tenant_id": "t"}),
+    ("post", "/v1/agent/runs/async", {"prompt": "hello", "tenant_id": "t"}),
     ("post", "/v1/agent/runs/run-1/resume", {}),
 ]
 

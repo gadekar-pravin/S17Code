@@ -14,6 +14,7 @@ needs and leave the rest of the ~30-event protocol available:
   task_succeeded -> STEP_FINISHED (+ STATE_DELTA with the node result)
   task_failed    -> STEP_FINISHED (error) + RUN_ERROR
   task_cancelled -> CUSTOM (step_cancelled)
+  run_failed     -> RUN_ERROR
   run_resumed    -> CUSTOM (run_resumed)
 
 RUN_FINISHED is not a journal event in S13 (finished is a run flag), so it is
@@ -46,6 +47,7 @@ _KIND_TO_AGUI = {
     "task_succeeded": "STEP_FINISHED",
     "task_failed": "STEP_FINISHED",
     "task_cancelled": "CUSTOM",
+    "run_failed": "RUN_ERROR",
 }
 
 
@@ -75,6 +77,9 @@ def to_agui_event(journal_event: dict) -> dict:
         return {**base, "stepName": node, "error": payload.get("error", "task failed")}
     if kind == "task_cancelled":
         return {**base, "custom": "step_cancelled", "stepName": node}
+    if kind == "run_failed":
+        return {**base, "error": payload.get("error", "run failed"),
+                "errorType": payload.get("error_type", "RuntimeError")}
     if kind == "run_resumed":
         return {**base, "custom": "run_resumed"}
     return base

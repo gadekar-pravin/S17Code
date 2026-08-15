@@ -7,6 +7,7 @@ database file; the only seam is HTTP.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from contextlib import asynccontextmanager
@@ -43,6 +44,7 @@ def _secrets(name: str) -> set[str]:
 async def lifespan(app: FastAPI):
     app.state.gateway = GatewayClient()
     app.state.runtime = AgentRuntime()
+    app.state.background_tasks: set[asyncio.Task] = set()
     data_dir = app.state.runtime.root
     app.state.event_store = EventStore(data_dir / "events")
     app.state.event_engine = AutonomousEventEngine(app.state.event_store, app.state.runtime)
@@ -119,6 +121,11 @@ async def lifespan(app: FastAPI):
         await app.state.a2a_grpc_server.start()
     app.state.started_at = time.time()
     yield
+    pending = tuple(app.state.background_tasks)
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
     if app.state.a2a_grpc_server:
         await app.state.a2a_grpc_server.stop()
     await app.state.a2a_server.close()

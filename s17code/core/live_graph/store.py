@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tempfile
 import threading
 from datetime import UTC, datetime
@@ -30,6 +31,7 @@ class GraphStore:
     """
 
     FORMAT = "s17-networkx-run-v1"
+    MAX_ERROR_MESSAGE = 2_000
 
     def __init__(self, path: str | Path):
         # Older callers use names such as graph.sqlite. Keep that public API,
@@ -141,6 +143,58 @@ class GraphStore:
             state = self._new(run_id, context or {})
             self._event(state, "run_started", None, {})
             self._save(state)
+            return True
+
+    @classmethod
+    def _safe_error_message(cls, message: str) -> str:
+        """Bound an exception message and redact credential-shaped content."""
+        safe = " ".join(str(message).split())
+        for name, value in os.environ.items():
+            upper = name.upper()
+            if value and len(value) >= 4 and any(marker in upper for marker in (
+                "TOKEN", "SECRET", "PASSWORD", "API_KEY", "PRIVATE_KEY", "CREDENTIAL"
+            )):
+                safe = safe.replace(value, "[REDACTED]")
+        safe = re.sub(
+            r"(?i)(authorization\s*[:=]\s*(?:bearer\s+)?)[^\s,;]+",
+            r"\1[REDACTED]",
+            safe,
+        )
+        safe = re.sub(
+            r"(?i)\b(api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,;]+",
+            r"\1=[REDACTED]",
+            safe,
+        )
+        return safe[:cls.MAX_ERROR_MESSAGE]
+
+    def fail_run(self, run_id: str, *, error_type: str, message: str) -> bool:
+        """Atomically finish an unfinished run after its background execution crashes."""
+        forgotten: list[tuple[str, str]] = []
+        with self._lock:
+            state = self._load(run_id)
+            graph: nx.DiGraph = state["graph"]
+            if graph.graph.get("finished"):
+                return False
+            for node_id, node in graph.nodes(data=True):
+                if node.get("state") not in {
+                    NodeState.PENDING, NodeState.RUNNING, NodeState.WAITING
+                }:
+                    continue
+                was_running = node["state"] == NodeState.RUNNING
+                wait = node.pop("wait", None) or {}
+                if wait.get("handle") and wait.get("event_type"):
+                    forgotten.append((str(wait["handle"]), str(wait["event_type"])))
+                node["state"] = NodeState.CANCELLED
+                self._event(state, "task_cancelled", str(node_id),
+                            {"reason": "run failed", "was_running": was_running})
+            graph.graph["finished"] = True
+            self._event(state, "run_failed", None, {
+                "error_type": str(error_type)[:200],
+                "error": self._safe_error_message(message),
+            })
+            self._save(state)
+            for handle, event_type in forgotten:
+                self._forget_handle(handle, event_type)
             return True
 
     def context(self, run_id: str) -> dict[str, Any]:

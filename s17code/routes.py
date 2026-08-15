@@ -1,21 +1,26 @@
 """Local agent-runtime endpoints."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import os
 from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
 
 from s17code.auth import require_completion, require_control
 from s17code.core.memory import MemoryKind, MemoryScope, Principal
 from s17code.telemetry import export_run
 
 router = APIRouter(prefix="/v1/agent", tags=["live agent"])
+log = logging.getLogger(__name__)
 
 
 async def gateway_text_llm(app, prompt: str, system: str):
@@ -197,6 +202,56 @@ async def run(body: RunBody, request: Request):
         raise HTTPException(422, str(error)) from error
     except RuntimeError as error:
         raise HTTPException(503, str(error)) from error
+
+
+@router.post("/runs/async", dependencies=[Depends(require_control)])
+async def run_async(body: RunBody, request: Request):
+    """Durably accept a new run, then execute it after the response is sent."""
+    runtime = request.app.state.runtime
+    try:
+        prepared = runtime.prepare_run(
+            prompt=body.prompt, scope=body.scope(), source_uri="api://agent/runs",
+            source_author=body.user_id or "api-user", respond_as=body.respond_as,
+            budget=body.budget, principal=body.principal,
+            allowed_side_effects=set(body.allowed_side_effects),
+        )
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    except RuntimeError as error:
+        raise HTTPException(503, str(error)) from error
+
+    response_sent = asyncio.Event()
+
+    async def execute() -> None:
+        await response_sent.wait()
+        try:
+            await runtime.execute_prepared(
+                prepared,
+                llm=lambda prompt, system: gateway_text_llm(request.app, prompt, system),
+                transport=request.app.state.gateway,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            try:
+                runtime.graph.fail_run(
+                    prepared.run_id, error_type=type(error).__name__, message=str(error)
+                )
+            except Exception:
+                log.exception("could not journal background failure for run %s", prepared.run_id)
+
+    task = asyncio.create_task(execute(), name=f"s17-run-{prepared.run_id}")
+    request.app.state.background_tasks.add(task)
+    task.add_done_callback(request.app.state.background_tasks.discard)
+
+    async def release_response_gate() -> None:
+        response_sent.set()
+
+    return JSONResponse(
+        status_code=202,
+        content={"run_id": prepared.run_id, "status": "accepted"},
+        background=BackgroundTask(release_response_gate),
+    )
 
 
 @router.post("/channel-messages")
