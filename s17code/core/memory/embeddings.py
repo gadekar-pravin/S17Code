@@ -15,8 +15,14 @@ class Embedder(Protocol):
 
 class OllamaNomicEmbedder:
     """Small dependency-free client for a locally running Ollama instance."""
-    def __init__(self, model: str = "nomic-embed-text", base_url: str = "http://localhost:11434"):
-        self.model, self.base_url = model, base_url.rstrip("/")
+    # nomic-embed-text reports a 2048 context, but the runner aborts past BERT's 512-token
+    # positional limit, and Ollama truncates to the *reported* figure — so its own guard
+    # cuts too late and the process dies mid-request. Pinning num_ctx moves truncation to a
+    # survivable point. Vectors for text that already fit are byte-identical, so this does
+    # not disturb stored embeddings and the fingerprint below stays valid.
+    def __init__(self, model: str = "nomic-embed-text", base_url: str = "http://localhost:11434",
+                 context_tokens: int = 512):
+        self.model, self.base_url = model, base_url.rstrip("/"); self.context_tokens = context_tokens
 
     @property
     def fingerprint(self) -> str:
@@ -35,14 +41,17 @@ class OllamaNomicEmbedder:
     def _embed(self, text: str) -> list[float]:
         # Ollama's current endpoint accepts batched input; older installs use
         # /api/embeddings. Supporting both keeps local workshop setup simple.
-        body = json.dumps({"model": self.model, "input": text}).encode()
+        options = {"num_ctx": self.context_tokens}
+        body = json.dumps({"model": self.model, "input": text, "options": options}).encode()
         request = Request(self.base_url + "/api/embed", data=body, headers={"Content-Type": "application/json"})
         try:
             with urlopen(request, timeout=30) as response:  # nosec B310: local configurable service
                 data = json.load(response)
             return list(data["embeddings"][0])
         except Exception:
-            old_body = json.dumps({"model": self.model, "prompt": text}).encode()
+            # The retry is for installs predating /api/embed, not for oversized input: it
+            # reaches the same runner, so it must carry the same bound or it repeats the abort.
+            old_body = json.dumps({"model": self.model, "prompt": text, "options": options}).encode()
             old = Request(self.base_url + "/api/embeddings", data=old_body, headers={"Content-Type": "application/json"})
             with urlopen(old, timeout=30) as response:  # nosec B310: local configurable service
                 return list(json.load(response)["embedding"])
