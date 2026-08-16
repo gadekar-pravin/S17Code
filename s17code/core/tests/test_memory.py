@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import unittest
+from unittest import mock
 
 from s17code.core.memory import (
     MemoryKind,
@@ -11,8 +13,9 @@ from s17code.core.memory import (
     Principal,
     SourceRef,
 )
+from s17code.core.memory import embeddings as embeddings_module
 from s17code.core.memory.chunking import fixed_word_chunks, semantic_chunks
-from s17code.core.memory.embeddings import DeterministicEmbedder
+from s17code.core.memory.embeddings import DeterministicEmbedder, OllamaNomicEmbedder
 
 AGENT = Principal("researcher", "agent")
 SOURCE = SourceRef("message://u1/1", "user", excerpt="original user statement")
@@ -73,6 +76,42 @@ class MemoryProofTests(unittest.TestCase):
         hit = self.store.recall("Does a second Gemini key provide separate quota?", self.scope_a,
                                 kinds=[MemoryKind.DOCUMENT_CHUNK], limit=1)[0]
         self.assertIn("second Gemini key provides separate quota", hit.text)
+
+
+class _FakeResponse:
+    def __init__(self, payload: bytes) -> None: self.payload = payload
+    def read(self) -> bytes: return self.payload
+    def __enter__(self) -> _FakeResponse: return self
+    def __exit__(self, *exc: object) -> bool: return False
+
+
+class OllamaEmbedderContextTests(unittest.TestCase):
+    """nomic-embed-text advertises a 2048 context but its runner aborts past 512
+    tokens, and Ollama's own default truncation targets the advertised figure. An
+    oversized document therefore killed the runner: the request answered 500, the
+    legacy retry hit the same fault, and the node failed with a bare HTTPError.
+    Every request must pin num_ctx so the server truncates where it can survive."""
+
+    def capture(self, primary_fails: bool = False) -> list[dict]:
+        sent: list[dict] = []
+        payload = json.dumps({"embeddings": [[0.5, 0.5]], "embedding": [0.5, 0.5]}).encode()
+
+        def fake_urlopen(request: object, timeout: int | None = None) -> _FakeResponse:
+            sent.append(json.loads(request.data.decode()))  # type: ignore[attr-defined]
+            if primary_fails and len(sent) == 1: raise OSError("primary endpoint unavailable")
+            return _FakeResponse(payload)
+
+        with mock.patch.object(embeddings_module, "urlopen", fake_urlopen):
+            OllamaNomicEmbedder().embed_document("ownership prevents data races. " * 400)
+        return sent
+
+    def test_request_pins_context_to_the_runners_real_limit(self) -> None:
+        self.assertEqual(self.capture()[0]["options"]["num_ctx"], 512)
+
+    def test_legacy_retry_pins_the_same_limit(self) -> None:
+        # The fallback exists for older installs, but it reaches the same runner:
+        # retrying an unbounded payload there only repeats the abort.
+        self.assertEqual(self.capture(primary_fails=True)[1]["options"]["num_ctx"], 512)
 
 
 if __name__ == "__main__":
