@@ -9,9 +9,13 @@ the workspace's own diff, and the whole suite stayed green.
 from __future__ import annotations
 
 import inspect
+import json
+from types import SimpleNamespace
 
 import pytest
 
+from s17code.coding.exec import CommandResult
+from s17code.core.live_graph import TaskSpec
 from s17code.workers import RunContext
 from s17code.workers import coding as workers
 
@@ -66,3 +70,26 @@ def test_the_coding_workers_are_thin() -> None:
         body = [line for line in inspect.getsource(getattr(workers, name)).splitlines()
                 if line.strip() and not line.strip().startswith(("#", '"""', "'''"))]
         assert len(body) <= 12, f"{name} is {len(body)} lines; the rule belongs in coding/"
+
+
+@pytest.mark.asyncio
+async def test_run_command_worker_returns_graph_serializable_evidence(monkeypatch) -> None:
+    """Container and host execution share a dataclass result; graphs store plain data."""
+
+    result = CommandResult(
+        command=["docker", "run", "node:22", "node", "p5check.js", "sketch.js"],
+        exit_code=1,
+        stdout="",
+        stderr="P5CHECK FAIL",
+        timed_out=False,
+        duration_seconds=0.125,
+    )
+    monkeypatch.setattr(workers, "run_command", lambda *_args, **_kwargs: result)
+    ctx = SimpleNamespace(workspace=lambda: object())
+    task = TaskSpec("check", "run_command", {"command": "node p5check.js sketch.js"})
+
+    evidence = await workers.run_command_worker(ctx, task)
+
+    assert evidence == result.as_dict()
+    assert evidence["exit_code"] == 1
+    assert json.loads(json.dumps(evidence)) == evidence
