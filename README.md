@@ -189,11 +189,14 @@ Only a gateway-verified installation owner receives the side-effect authority
 listed in `S17_CHANNEL_ALLOWED_SIDE_EFFECTS`; other allowed senders remain
 read-only.
 
-Example:
+Example. `POST /v1/agent/runs` is a control-plane write, so it needs
+`S17_CONTROL_TOKEN` as a bearer token; without the header it answers 401, and
+with the token unset on the server it answers 503:
 
 ```bash
 curl -s http://127.0.0.1:8113/v1/agent/runs \
   -H 'content-type: application/json' \
+  -H "authorization: Bearer $S17_CONTROL_TOKEN" \
   -d '{
     "tenant_id":"demo",
     "project_id":"general-agent",
